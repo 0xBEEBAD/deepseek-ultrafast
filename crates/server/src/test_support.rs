@@ -1,18 +1,31 @@
-use tokenizers::{AddedToken, Tokenizer, models::bpe::BPE, pre_tokenizers::byte_level::ByteLevel};
+use tokenizers::pipeline::{EncodeOptions, Token, Tokenizer};
 
+/// A byte-level BPE without merges: one token a byte, then the control tokens.
 pub fn tokenizer() -> Tokenizer {
-    let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
+    let mut alphabet: Vec<char> = crate::token_text::byte_of_char().into_keys().collect();
     alphabet.sort_unstable();
-    let vocab: tokenizers::models::bpe::Vocab = alphabet.into_iter().enumerate().map(|(i, c)| (c.to_string(), i as u32)).collect();
-    let mut tokenizer = Tokenizer::new(BPE::builder().vocab_and_merges(vocab, vec![]).build().unwrap());
-    tokenizer.with_pre_tokenizer(Some(ByteLevel::new(false, true, true)));
-    tokenizer.with_decoder(Some(ByteLevel::default()));
-    tokenizer.add_special_tokens(CONTROL_TOKENS[..2].iter().map(|&text| AddedToken::from(text, true))).unwrap();
-    tokenizer.add_tokens(CONTROL_TOKENS[2..].iter().map(|&text| AddedToken::from(text, false))).unwrap();
-    tokenizer
-        .add_tokens([AddedToken::from(deepseek_recipe_core::multimodal::IMAGE_SPECIAL_TOKEN, false), AddedToken::from("<｜deepseek_image｜>", false)])
-        .unwrap();
-    tokenizer
+    let vocab: serde_json::Map<String, serde_json::Value> = alphabet.into_iter().enumerate().map(|(i, c)| (c.to_string(), i.into())).collect();
+    let image = [deepseek_recipe_core::multimodal::IMAGE_SPECIAL_TOKEN, "<｜deepseek_image｜>"];
+    let added: Vec<_> = CONTROL_TOKENS
+        .iter()
+        .chain(&image)
+        .enumerate()
+        .map(|(i, text)| {
+            let special = i < 2;
+            serde_json::json!({"id": 256 + i, "content": text, "special": special, "normalized": !special, "single_word": false, "lstrip": false, "rstrip": false})
+        })
+        .collect();
+    let byte_level = serde_json::json!({"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true});
+    let config = serde_json::json!({
+        "version": "1.0", "added_tokens": added, "pre_tokenizer": byte_level, "decoder": byte_level,
+        "model": {"type": "BPE", "vocab": vocab, "merges": []},
+    });
+    tokenizers::from_json(&tokenizers::canonicalize_str(&config.to_string()).unwrap()).unwrap()
+}
+
+pub fn encode(tok: &Tokenizer, text: &str) -> Vec<u32> {
+    let encodings = tok.encode(text, &EncodeOptions::no_specials()).wait().unwrap();
+    Token::cast_slice(encodings[0].ids()).to_vec()
 }
 
 pub const CONTROL_TOKENS: &[&str] = &[

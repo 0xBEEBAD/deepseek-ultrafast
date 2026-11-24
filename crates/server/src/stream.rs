@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokenizers::Tokenizer;
+use tokenizers::pipeline::Tokenizer;
 
 pub struct Detok {
     tok: Arc<Tokenizer>,

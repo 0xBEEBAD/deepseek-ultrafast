@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 use tokenizers::normalizers::replace::ReplacePattern;
-use tokenizers::normalizers::{Lowercase, NFD, NFKC, Replace, Sequence, StripAccents, Strip};
-use tokenizers::{NormalizedString, Normalizer, NormalizerWrapper, Tokenizer};
+use tokenizers::normalizers::{Lowercase, NFD, NFKC, Replace, StripAccents, Strip};
+use tokenizers::pipeline::{Normalizer, Tokenizer, normalize_all};
 
 #[derive(Debug, PartialEq)]
 pub struct EngramConsts {
@@ -20,7 +20,7 @@ pub struct EngramConsts {
 
 impl EngramConsts {
     pub fn compute(dir: &Path, cfg: &Config) -> Result<Self> {
-        let tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        let tok = crate::load_tokenizer(dir)?;
         let (token_map, n) = compressed_token_map(&tok)?;
         ensure!(n == cfg.engram_compressed_vocab_size, "Engram: {n} compressed tokens, the config expects {}", cfg.engram_compressed_vocab_size);
         let pad_id = *token_map.get(cfg.engram_pad_id).context("Engram pad id outside the vocabulary")?;
@@ -52,27 +52,25 @@ impl<'a> EngramCell<'a> {
 
 fn compressed_token_map(tok: &Tokenizer) -> Result<(Vec<i32>, usize)> {
     let sentinel = "\u{e000}";
-    let normalizers: Vec<NormalizerWrapper> = vec![
-        NFKC.into(),
-        NFD.into(),
-        StripAccents.into(),
-        Lowercase.into(),
-        Replace::new(ReplacePattern::Regex(r"[ \t\r\n]+".into()), " ").map_err(|e| anyhow!("{e}"))?.into(),
-        Replace::new(ReplacePattern::Regex(r"^ $".into()), sentinel).map_err(|e| anyhow!("{e}"))?.into(),
-        Strip::new(true, true).into(),
-        Replace::new(sentinel, " ").map_err(|e| anyhow!("{e}"))?.into(),
+    let norm = [
+        Normalizer::NFKC(NFKC),
+        Normalizer::NFD(NFD),
+        Normalizer::StripAccents(StripAccents::new()),
+        Normalizer::Lowercase(Lowercase),
+        Normalizer::Replace(Replace::new(ReplacePattern::Regex(r"[ \t\r\n]+".into()), " ").map_err(|e| anyhow!("{e}"))?),
+        Normalizer::Replace(Replace::new(ReplacePattern::Regex(r"^ $".into()), sentinel).map_err(|e| anyhow!("{e}"))?),
+        Normalizer::Strip(Strip::new(true, true)),
+        Normalizer::Replace(Replace::new(sentinel, " ").map_err(|e| anyhow!("{e}"))?),
     ];
-    let norm = Sequence::new(normalizers);
     let key = |id: u32| -> Result<String> {
         let text = tok.decode(&[id], false).map_err(|e| anyhow!("decode token {id}: {e}"))?;
         if text.contains('\u{fffd}') {
             return tok.id_to_token(id).with_context(|| format!("token {id} has no string"));
         }
-        let mut n = NormalizedString::from(text.as_str());
-        norm.normalize(&mut n).map_err(|e| anyhow!("normalize token {id}: {e}"))?;
-        Ok(if n.get().is_empty() { text } else { n.get().to_owned() })
+        let n = normalize_all(&norm, &text, 0).map_err(|e| anyhow!("normalize token {id}: {e}"))?.into_owned();
+        Ok(if n.is_empty() { text } else { n })
     };
-    let keys: Vec<String> = (0..tok.get_vocab_size(true) as u32).map(key).collect::<Result<_>>()?;
+    let keys: Vec<String> = (0..crate::vocab_size(tok) as u32).map(key).collect::<Result<_>>()?;
     let mut ids: HashMap<&str, i32> = HashMap::new();
     let map = keys.iter().map(|k| { let next = ids.len() as i32; *ids.entry(k).or_insert(next) }).collect();
     Ok((map, ids.len()))

@@ -1,8 +1,8 @@
 use deepseek_ultrafast_kv_transfer::TokenText;
 use std::collections::HashMap;
-use tokenizers::Tokenizer;
+use tokenizers::pipeline::Tokenizer;
 
-fn byte_of_char() -> HashMap<char, u8> {
+pub(crate) fn byte_of_char() -> HashMap<char, u8> {
     let mut bytes: Vec<u32> = (33..=126).chain(161..=172).chain(174..=255).collect();
     let mut chars = bytes.clone();
     let mut extra = 0;
@@ -17,7 +17,7 @@ fn byte_of_char() -> HashMap<char, u8> {
 }
 
 pub fn token_text(tok: &Tokenizer) -> TokenText {
-    let added = tok.get_added_tokens_decoder();
+    let added = tok.get_added_vocabulary().get_added_tokens_decoder();
     let vocab = tok.get_vocab(true);
     let n = vocab.values().max().map_or(0, |&id| id as usize + 1);
     let byte = byte_of_char();
@@ -49,7 +49,7 @@ mod tests {
         let tok = tokenizer();
         let text = token_text(&tok);
         let s = "Tetris · pure vanilla ✓ 日本語\n\tend";
-        let ids: Vec<i32> = tok.encode(s, false).unwrap().get_ids().iter().map(|&i| i as i32).collect();
+        let ids: Vec<i32> = crate::test_support::encode(&tok, s).iter().map(|&i| i as i32).collect();
         let spelled: Vec<u8> = ids.iter().flat_map(|&id| text_bytes(&text, id)).collect();
         assert_eq!(spelled, s.as_bytes());
         let mut prompt = ids.clone();
@@ -75,10 +75,10 @@ mod tests {
             eprintln!("DSUF_TEST_CKPT unset: skipped");
             return;
         };
-        let tok = Tokenizer::from_file(std::path::Path::new(&dir).join("tokenizer.json")).unwrap();
+        let tok = deepseek_ultrafast_engine::load_tokenizer(std::path::Path::new(&dir)).unwrap();
         let text = token_text(&tok);
         let (mut checked, mut atomic) = (0, 0);
-        for id in 0..tok.get_vocab_size(true) as i32 {
+        for id in 0..deepseek_ultrafast_engine::vocab_size(&tok) as i32 {
             let Some((bytes, is_atomic)) = text.bytes(id) else { continue };
             if is_atomic {
                 atomic += 1;

@@ -20,11 +20,12 @@ use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokenizers::Tokenizer;
+use tokenizers::pipeline::Tokenizer;
 use tokio::sync::mpsc;
 
 pub struct App {
     pub tok: Arc<Tokenizer>,
+    pub vocab: i32,
     pub jobs: std::sync::mpsc::Sender<Job>,
     pub model: String,
     pub max_seq: usize,
@@ -543,8 +544,7 @@ async fn completions(State(app): State<Arc<App>>, Extension(trace): Extension<Tr
         Value::Array(a) => ids(a).ok_or_else(|| bad("prompt: a string, a list of token ids, or a one-element list of either (batches are not supported)"))?,
         _ => return Err(bad("prompt must be a string or token ids")),
     };
-    let vocab = app.tok.get_vocab_size(true) as i32;
-    if tokens.iter().any(|&t| t < 0 || t >= vocab) {
+    if tokens.iter().any(|&t| t < 0 || t >= app.vocab) {
         return Err(bad("prompt: token id out of range"));
     }
     trace.parsed(tokens.len());

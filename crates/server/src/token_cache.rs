@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use tokenizers::{OffsetReferential, OffsetType, Tokenizer};
+use tokenizers::pipeline::{EncodeOptions, Segment, SpecialSegmentIterator, Token, Tokenizer};
 
 const CACHED_BYTES: usize = 256;
 const PARALLEL_BYTES: usize = 64 << 10;
@@ -54,20 +54,32 @@ fn cache_for(tok: &Tokenizer) -> Option<&'static Mutex<Cache>> {
 }
 
 enum Piece<'a> {
-    Special(Vec<u32>),
+    Special(u32),
     Text(&'a str),
 }
 
+fn pieces<'a>(tok: &Tokenizer, text: &'a str) -> Vec<Piece<'a>> {
+    let added = tok.get_added_vocabulary();
+    // The second search finds the tokens declared on normalized text. It reads the raw text, which is only right without normalizers.
+    let search_normalized = tok.get_normalizers().is_empty();
+    let mut pieces = Vec::new();
+    for raw in SpecialSegmentIterator::new(text, added, false, false) {
+        match raw {
+            Segment::SpecialToken(id) => pieces.push(Piece::Special(id)),
+            Segment::Text { text, .. } if search_normalized => {
+                pieces.extend(SpecialSegmentIterator::new(text, added, true, false).map(|segment| match segment {
+                    Segment::SpecialToken(id) => Piece::Special(id),
+                    Segment::Text { text, .. } => Piece::Text(text),
+                }));
+            }
+            Segment::Text { text, .. } => pieces.push(Piece::Text(text)),
+        }
+    }
+    pieces
+}
+
 pub fn encode(tok: &Tokenizer, text: &str) -> Result<Vec<u32>> {
-    let split = tok.get_added_vocabulary().extract_and_normalize(tok.get_normalizer(), text);
-    let pieces: Vec<Piece> = split
-        .get_splits(OffsetReferential::Original, OffsetType::Byte)
-        .into_iter()
-        .map(|(_, (start, end), tokens)| match tokens {
-            Some(tokens) => Piece::Special(tokens.iter().map(|t| t.id).collect()),
-            None => Piece::Text(&text[start..end]),
-        })
-        .collect();
+    let pieces = pieces(tok, text);
     let cache = cache_for(tok);
     let mut done: Vec<Option<Arc<[u32]>>> = vec![None; pieces.len()];
     if let Some(cache) = cache {
@@ -92,8 +104,11 @@ pub fn encode(tok: &Tokenizer, text: &str) -> Result<Vec<u32>> {
             _ => None,
         })
         .collect();
+    let options = EncodeOptions::no_specials();
     let run = |&(_, s): &(usize, &str)| -> Result<Arc<[u32]>> {
-        Ok(tok.encode_fast(s, false).map_err(|e| anyhow!("tokenizer: {e}"))?.get_ids().into())
+        let mut ids = Vec::new();
+        tok.encode_into(s, &options, &mut ids).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        Ok(Token::cast_slice(&ids).into())
     };
     let parallel = misses.len() > 1 && misses.iter().map(|(_, s)| s.len()).sum::<usize>() >= PARALLEL_BYTES;
     let encoded: Vec<Arc<[u32]>> = if parallel {
@@ -115,7 +130,7 @@ pub fn encode(tok: &Tokenizer, text: &str) -> Result<Vec<u32>> {
     let mut out = Vec::new();
     for (piece, ids) in pieces.iter().zip(&done) {
         match (piece, ids) {
-            (Piece::Special(ids), _) => out.extend_from_slice(ids),
+            (Piece::Special(id), _) => out.push(*id),
             (Piece::Text(_), Some(ids)) => out.extend_from_slice(ids),
             (Piece::Text(_), None) => unreachable!(),
         }
@@ -128,7 +143,7 @@ mod tests {
     use super::*;
 
     fn reference(tok: &Tokenizer, text: &str) -> Vec<u32> {
-        tok.encode(text, false).unwrap().get_ids().to_vec()
+        crate::test_support::encode(tok, text)
     }
 
     #[test]
@@ -142,16 +157,18 @@ mod tests {
     #[test]
     fn matches_whole_encode_on_the_checkpoint_tokenizer() {
         let Ok(dir) = std::env::var("DSUF_TEST_CKPT") else { return };
-        let tok = Arc::new(Tokenizer::from_file(std::path::Path::new(&dir).join("tokenizer.json")).unwrap());
+        let tok = Arc::new(deepseek_ultrafast_engine::load_tokenizer(std::path::Path::new(&dir)).unwrap());
         register(tok.clone());
         assert!(cache_for(&tok).is_some());
-        let specials: Vec<String> = tok.get_added_tokens_decoder().values().map(|t| t.content.clone()).collect();
+        let mut specials: Vec<String> = tok.get_added_vocabulary().get_added_tokens_decoder().into_values().map(|t| t.content).collect();
+        specials.sort();
         let body = "fn main() {\n    println!(\"héllo 世界 🙂 12345\");\n}\n\tTabs  and   spaces.\n".repeat(40);
         let mut texts = vec![body.clone(), String::new(), " ".into(), "\n".into()];
         for (i, s) in specials.iter().enumerate().step_by(97) {
             texts.push(format!("{s}{body}{s}{s} tail {}", specials[(i * 7) % specials.len()]));
             texts.push(format!("{}{s}{}", &body[..300], &body[..200]));
-            texts.push(format!("{}{}", &s[..s.len() / 2], &s[s.len() / 2..]));
+            let half = s.floor_char_boundary(s.len() / 2);
+            texts.push(format!("{}{}", &s[..half], &s[half..]));
         }
         let big = format!("<｜begin▁of▁sentence｜>{}<｜User｜>{}<｜Assistant｜></think>{}", body, body.repeat(30), body.repeat(10));
         texts.push(big);

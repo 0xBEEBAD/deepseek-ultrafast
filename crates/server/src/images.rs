@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::VecDeque, net::{IpAddr, SocketAddr}, sync::{Arc, Mutex, OnceLock}, time::Duration};
 use tokio::sync::Semaphore;
 pub use crate::image_identity::Images;
-use tokenizers::Tokenizer;
+use tokenizers::pipeline::Tokenizer;
 
 #[derive(Debug)]
 pub struct Busy;

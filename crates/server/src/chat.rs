@@ -7,7 +7,7 @@ use deepseek_recipe_core::multimodal::{IMAGE_SPECIAL_TOKEN, ImageSource};
 use deepseek_recipe_core::conversation::Conversation;
 use deepseek_recipe_encoding::{PromptEncoding, dsv41::DeepseekV41Encoding};
 use serde_json::Value;
-use tokenizers::Tokenizer;
+use tokenizers::pipeline::Tokenizer;
 
 pub use deepseek_recipe_encoding::v4::EOS_TOKEN as EOS;
 

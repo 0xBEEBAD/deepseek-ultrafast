@@ -60,7 +60,8 @@ fn run() -> Result<()> {
     let _logging = deepseek_ultrafast_logging::init()?;
     let rt = tokio::runtime::Runtime::new()?;
     let peer_options = peer::Options::new(&ea)?;
-    let tok = Arc::new(tokenizers::Tokenizer::from_file(ea.ckpt.join("tokenizer.json")).map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?);
+    let tok = Arc::new(deepseek_ultrafast_engine::load_tokenizer(&ea.ckpt)?);
+    let vocab = deepseek_ultrafast_engine::vocab_size(&tok) as i32;
     deepseek_ultrafast_server::token_cache::register(tok.clone());
     let peer_options = peer_options.with_token_text(Arc::new(deepseek_ultrafast_server::token_text::token_text(&tok)));
     let eos = tok.token_to_id(chat::EOS).context("tokenizer has no end-of-sentence token")? as i32;
@@ -75,7 +76,7 @@ fn run() -> Result<()> {
         Err(_) => return eng.join().map_err(|_| anyhow::anyhow!("engine thread panicked"))?,
     };
 
-    let app = Arc::new(api::App { tok, jobs: tx, model, max_seq, eos });
+    let app = Arc::new(api::App { tok, vocab, jobs: tx, model, max_seq, eos });
     rt.block_on(async move {
         let ready = deepseek_ultrafast_server::readiness::Readiness::default();
         let result: Result<()> = async {
